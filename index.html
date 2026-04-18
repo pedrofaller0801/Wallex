@@ -18,12 +18,10 @@
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 
-<!-- Firebase -->
-
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile, sendEmailVerification } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-import { getFirestore, doc, collection, addDoc, getDocs, deleteDoc, setDoc, getDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile, sendEmailVerification, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, doc, collection, addDoc, getDocs, deleteDoc, setDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyC9e-U4eROqM86VQNLIyDT1EyUelcsbc5A",
@@ -38,6 +36,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const googleProvider = new GoogleAuthProvider();
 
 // ── CONSTANTS ──
 const MONTHS = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
@@ -52,7 +51,7 @@ let txType = 'saida', selectedCat = null, selectedEmoji = '✈️';
 let pieChartInst = null, compChartInst = null, histChartInst = null;
 let cachedTransactions = [], cachedObjectives = [];
 
-// ── FIRESTORE HELPERS ──
+// ── FIRESTORE ──
 const txCol = uid => collection(db, 'users', uid, 'transactions');
 const objCol = uid => collection(db, 'users', uid, 'objectives');
 
@@ -107,23 +106,49 @@ window.doLogin = async () => {
   }
 };
 
+window.doLoginGoogle = async () => {
+  const err = document.getElementById('login-error');
+  err.style.display = 'none';
+  try {
+    const result = await signInWithPopup(auth, googleProvider);
+    // Save user info to Firestore if first time
+    await setDoc(doc(db, 'users', result.user.uid), {
+      nome: result.user.displayName,
+      email: result.user.email,
+    }, { merge: true });
+  } catch(e) {
+    err.textContent = 'Erro ao entrar com Google. Tente novamente.';
+    err.style.display = 'block';
+  }
+};
+
 window.doCadastro = async () => {
   const nome = document.getElementById('cad-nome').value.trim();
   const email = document.getElementById('cad-email').value.trim();
   const senha = document.getElementById('cad-senha').value;
+  const confirma = document.getElementById('cad-confirma').value;
   const err = document.getElementById('cadastro-error');
   const btn = document.getElementById('cadastro-btn');
-  if (!nome || !email || senha.length < 6) {
-    err.textContent = 'Preencha todos os campos. Senha mínimo 6 caracteres.';
+  err.style.display = 'none';
+
+  if (!nome || !email || !senha) {
+    err.textContent = 'Preencha todos os campos.';
     err.style.display = 'block'; return;
   }
-  err.style.display = 'none';
+  if (senha.length < 6) {
+    err.textContent = 'A senha deve ter no mínimo 6 caracteres.';
+    err.style.display = 'block'; return;
+  }
+  if (senha !== confirma) {
+    err.textContent = 'As senhas não coincidem.';
+    err.style.display = 'block'; return;
+  }
+
   btn.textContent = 'Criando conta...'; btn.disabled = true;
   try {
     const cred = await createUserWithEmailAndPassword(auth, email, senha);
     await updateProfile(cred.user, { displayName: nome });
     await sendEmailVerification(cred.user);
-    // Save display name to Firestore too
     await setDoc(doc(db, 'users', cred.user.uid), { nome, email, createdAt: Date.now() });
   } catch(e) {
     err.textContent = e.code === 'auth/email-already-in-use' ? 'Este e-mail já está cadastrado.' : 'Erro ao criar conta. Tente novamente.';
@@ -152,9 +177,7 @@ onAuthStateChanged(auth, async user => {
     updateMonthLabels();
     await Promise.all([loadTransactions(), loadObjectives()]);
     renderGeral();
-
-    // Show email verification banner if needed
-    if (!user.emailVerified) {
+    if (!user.emailVerified && user.providerData[0]?.providerId !== 'google.com') {
       document.getElementById('verify-banner').style.display = 'flex';
     }
   } else {
@@ -177,29 +200,52 @@ window.goTo = (page, btn) => {
 };
 
 window.changeMonth = dir => {
+  const now = new Date();
+  const todayMonth = now.getMonth();
+  const todayYear = now.getFullYear();
+
+  // Block future months
+  if (dir === 1) {
+    const isCurrentMonth = currentMonth === todayMonth && currentYear === todayYear;
+    if (isCurrentMonth) return;
+    // Also check if next would exceed current
+    let nextMonth = currentMonth + 1;
+    let nextYear = currentYear;
+    if (nextMonth > 11) { nextMonth = 0; nextYear++; }
+    if (nextYear > todayYear || (nextYear === todayYear && nextMonth > todayMonth)) return;
+  }
+
   currentMonth += dir;
   if (currentMonth < 0) { currentMonth = 11; currentYear--; }
   if (currentMonth > 11) { currentMonth = 0; currentYear++; }
   updateMonthLabels();
+  updateMonthBtnState();
   const activePage = document.querySelector('.page.active').id.replace('page-', '');
   if (activePage === 'geral') renderGeral();
   if (activePage === 'transacoes') renderTransacoes();
   if (activePage === 'graficos') renderGraficos();
 };
 
+function updateMonthBtnState() {
+  const now = new Date();
+  const isCurrentMonth = currentMonth === now.getMonth() && currentYear === now.getFullYear();
+  document.querySelectorAll('.month-btn-next').forEach(btn => {
+    btn.style.opacity = isCurrentMonth ? '0.3' : '1';
+    btn.style.cursor = isCurrentMonth ? 'not-allowed' : 'pointer';
+  });
+}
+
 function updateMonthLabels() {
   const label = MONTHS[currentMonth] + ' ' + currentYear;
   ['month-label','month-label-tx','month-label-graf'].forEach(id => {
     const el = document.getElementById(id); if (el) el.textContent = label;
   });
+  updateMonthBtnState();
 }
 
 // ── HELPERS ──
 const fmt = v => 'R$ ' + Math.abs(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-function getMonthTxs(m, y) {
-  return cachedTransactions.filter(t => t.month === m && t.year === y);
-}
+const getMonthTxs = (m, y) => cachedTransactions.filter(t => t.month === m && t.year === y);
 
 function getTotals(txs) {
   const entradas = txs.filter(t => t.type === 'entrada').reduce((a, t) => a + t.valor, 0);
@@ -233,7 +279,6 @@ function renderTxItem(t, showDelete = false) {
 
 const emptyState = () => `<div class="empty-state"><div class="empty-icon">💸</div><div class="empty-text">Nenhuma transação neste mês.<br>Clique em <strong>+ Adicionar</strong> para começar.</div></div>`;
 
-// ── DELETE TX ──
 window.deleteTx = async id => {
   if (!confirm('Remover esta transação?')) return;
   await deleteTransaction(id);
@@ -254,7 +299,6 @@ function renderGeral() {
   document.getElementById('geral-sub').textContent = MONTHS[currentMonth] + ' de ' + currentYear;
   const recent = [...txs].slice(0, 5);
   document.getElementById('g-tx-list').innerHTML = recent.length ? recent.map(t => renderTxItem(t)).join('') : emptyState();
-  // forecast mini
   const fEl = document.getElementById('g-forecast-content');
   if (saidas > 0 && entradas > 0) {
     const now = new Date();
@@ -273,7 +317,6 @@ function renderGeral() {
   } else {
     fEl.innerHTML = '<div style="color:var(--text3);font-size:13px;font-weight:600;">Adicione entradas e saídas para ver a previsão.</div>';
   }
-  // obj mini
   const objMini = document.getElementById('g-obj-mini');
   objMini.innerHTML = !cachedObjectives.length
     ? '<div style="color:var(--text3);font-size:13px;font-weight:600;">Nenhum objetivo criado.</div>'
@@ -327,7 +370,6 @@ function renderPrevisao() {
           <div class="cat-pct">${p}% • ${fmt(val)} até agora</div>
         </div>`;
       }).join('');
-  // hist chart
   const monthMap = {};
   cachedTransactions.filter(t => t.type === 'saida').forEach(t => {
     const k = t.year + '-' + String(t.month).padStart(2, '0');
@@ -492,16 +534,14 @@ window.dismissBanner = () => document.getElementById('verify-banner').style.disp
 *{margin:0;padding:0;box-sizing:border-box;}
 body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font-size:14px;min-height:100vh;}
 
-/* LOADER */
 #loader{position:fixed;inset:0;background:rgba(240,244,255,.85);z-index:999;display:none;align-items:center;justify-content:center;flex-direction:column;gap:16px;backdrop-filter:blur(4px);}
 .spinner{width:44px;height:44px;border:4px solid var(--border);border-top-color:var(--blue1);border-radius:50%;animation:spin .8s linear infinite;}
 @keyframes spin{to{transform:rotate(360deg)}}
 .loader-text{font-size:13px;font-weight:700;color:var(--text2);}
 
-/* VERIFY BANNER */
 #verify-banner{display:none;background:linear-gradient(135deg,rgba(74,144,226,.1),rgba(56,201,201,.1));border:1.5px solid var(--border);border-radius:12px;padding:12px 20px;margin-bottom:20px;align-items:center;justify-content:space-between;gap:12px;}
 .banner-text{font-size:13px;font-weight:700;color:var(--blue2);}
-.banner-close{background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;font-weight:700;transition:color .15s;}
+.banner-close{background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;font-weight:700;}
 .banner-close:hover{color:var(--red);}
 
 /* AUTH */
@@ -510,7 +550,7 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .auth-left::before{content:'';position:absolute;width:350px;height:350px;border-radius:50%;background:rgba(255,255,255,.08);top:-80px;right:-80px;}
 .auth-left::after{content:'';position:absolute;width:220px;height:220px;border-radius:50%;background:rgba(255,255,255,.05);bottom:40px;left:-40px;}
 .auth-logo{display:flex;align-items:center;gap:14px;margin-bottom:32px;position:relative;z-index:1;}
-.auth-logo-icon{width:54px;height:54px;background:rgba(255,255,255,.2);border-radius:16px;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(10px);}
+.auth-logo-icon{width:54px;height:54px;background:rgba(255,255,255,.2);border-radius:16px;display:flex;align-items:center;justify-content:center;}
 .w-letter{font-size:26px;font-weight:900;color:#fff;font-family:'Nunito',sans-serif;line-height:1;}
 .auth-brand-name{font-size:38px;font-weight:800;color:#fff;letter-spacing:-1px;}
 .auth-tagline{font-size:16px;color:rgba(255,255,255,.75);line-height:1.7;max-width:300px;position:relative;z-index:1;margin-bottom:48px;}
@@ -533,6 +573,16 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .btn-full{width:100%;padding:14px;background:var(--grad);color:#fff;border:none;border-radius:12px;font-family:'Nunito',sans-serif;font-size:15px;font-weight:800;cursor:pointer;margin-top:8px;transition:all .2s;box-shadow:0 4px 16px rgba(74,144,226,.35);}
 .btn-full:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 8px 24px rgba(74,144,226,.45);}
 .btn-full:disabled{opacity:.7;cursor:not-allowed;}
+
+/* Google button */
+.btn-google{width:100%;padding:13px;background:var(--surface);color:var(--text);border:2px solid var(--border);border-radius:12px;font-family:'Nunito',sans-serif;font-size:14px;font-weight:700;cursor:pointer;margin-top:12px;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:10px;box-shadow:var(--shadow);}
+.btn-google:hover{border-color:var(--blue1);box-shadow:0 4px 16px rgba(74,144,226,.15);}
+.google-icon{width:20px;height:20px;}
+
+.auth-divider{display:flex;align-items:center;gap:12px;margin:16px 0;}
+.auth-divider-line{flex:1;height:1px;background:var(--border);}
+.auth-divider-text{font-size:12px;color:var(--text3);font-weight:700;}
+
 .auth-error{background:var(--red-bg);color:var(--red);border-radius:10px;padding:10px 14px;font-size:12px;font-weight:700;margin-bottom:14px;display:none;}
 
 /* APP */
@@ -564,8 +614,10 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .page-title{font-size:28px;font-weight:800;letter-spacing:-.5px;}
 .page-sub{color:var(--text2);font-size:13px;margin-top:4px;font-weight:600;}
 .month-nav{display:flex;align-items:center;gap:12px;background:var(--surface);border:2px solid var(--border);border-radius:14px;padding:8px 16px;box-shadow:var(--shadow);}
-.month-btn{background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;padding:0 2px;transition:color .15s;line-height:1;}
+.month-btn{background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;padding:0 2px;transition:all .15s;line-height:1;}
 .month-btn:hover{color:var(--blue1);}
+.month-btn-next{background:none;border:none;color:var(--text3);cursor:pointer;font-size:18px;padding:0 2px;transition:all .15s;line-height:1;}
+.month-btn-next:hover{color:var(--blue1);}
 .month-label{font-weight:800;font-size:13px;min-width:130px;text-align:center;color:var(--text);}
 .cards-row{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px;}
 .card{background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:22px 24px;box-shadow:var(--shadow);}
@@ -652,7 +704,7 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 .cat-picker{display:flex;flex-wrap:wrap;gap:8px;}
 .cat-opt{padding:7px 16px;border-radius:22px;border:2px solid var(--border);background:none;cursor:pointer;font-family:'Nunito',sans-serif;font-size:12px;font-weight:700;color:var(--text2);transition:all .15s;}
 .cat-opt:hover{border-color:var(--blue1);color:var(--blue1);}
-.cat-opt.selected{border-color:var(--blue1);background:var(--grad);color:#fff;box-shadow:0 4px 12px rgba(74,144,226,.25);}
+.cat-opt.selected{border-color:var(--blue1);background:var(--grad);color:#fff;}
 .emoji-picker{display:flex;flex-wrap:wrap;gap:8px;}
 .emoji-opt{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:19px;cursor:pointer;background:var(--surface2);border:2px solid var(--border);transition:all .15s;}
 .emoji-opt:hover,.emoji-opt.selected{border-color:var(--blue1);background:rgba(74,144,226,.08);}
@@ -670,8 +722,6 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 
 </head>
 <body>
-
-<!-- LOADER -->
 
 <div id="loader">
   <div class="spinner"></div>
@@ -700,24 +750,42 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
         <button class="auth-tab active" onclick="switchTab('login')">Entrar</button>
         <button class="auth-tab" onclick="switchTab('cadastro')">Criar conta</button>
       </div>
-      <div id="tab-login">
-        <div class="auth-title">Bem-vindo de volta 👋</div>
-        <div class="auth-sub">Entre com seus dados para continuar</div>
-        <div class="auth-error" id="login-error"></div>
-        <div class="form-group"><label class="form-label">E-mail</label><input class="form-input" id="login-email" type="email" placeholder="seu@email.com"/></div>
-        <div class="form-group"><label class="form-label">Senha</label><input class="form-input" id="login-senha" type="password" placeholder="••••••••"/></div>
-        <button class="btn-full" id="login-btn" onclick="doLogin()">Entrar na conta</button>
-      </div>
-      <div id="tab-cadastro" style="display:none;">
-        <div class="auth-title">Criar sua conta ✨</div>
-        <div class="auth-sub">Comece a organizar sua vida financeira</div>
-        <div class="auth-error" id="cadastro-error"></div>
-        <div class="form-group"><label class="form-label">Nome</label><input class="form-input" id="cad-nome" placeholder="Seu nome"/></div>
-        <div class="form-group"><label class="form-label">E-mail</label><input class="form-input" id="cad-email" type="email" placeholder="seu@email.com"/></div>
-        <div class="form-group"><label class="form-label">Senha</label><input class="form-input" id="cad-senha" type="password" placeholder="Mínimo 6 caracteres"/></div>
-        <button class="btn-full" id="cadastro-btn" onclick="doCadastro()">Criar conta grátis</button>
-      </div>
-    </div>
+
+```
+  <!-- LOGIN -->
+  <div id="tab-login">
+    <div class="auth-title">Bem-vindo de volta 👋</div>
+    <div class="auth-sub">Entre com seus dados para continuar</div>
+    <div class="auth-error" id="login-error"></div>
+    <div class="form-group"><label class="form-label">E-mail</label><input class="form-input" id="login-email" type="email" placeholder="seu@email.com"/></div>
+    <div class="form-group"><label class="form-label">Senha</label><input class="form-input" id="login-senha" type="password" placeholder="••••••••"/></div>
+    <button class="btn-full" id="login-btn" onclick="doLogin()">Entrar na conta</button>
+    <div class="auth-divider"><div class="auth-divider-line"></div><div class="auth-divider-text">ou</div><div class="auth-divider-line"></div></div>
+    <button class="btn-google" onclick="doLoginGoogle()">
+      <svg class="google-icon" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+      Continuar com Google
+    </button>
+  </div>
+
+  <!-- CADASTRO -->
+  <div id="tab-cadastro" style="display:none;">
+    <div class="auth-title">Criar sua conta ✨</div>
+    <div class="auth-sub">Comece a organizar sua vida financeira</div>
+    <div class="auth-error" id="cadastro-error"></div>
+    <div class="form-group"><label class="form-label">Nome</label><input class="form-input" id="cad-nome" placeholder="Seu nome"/></div>
+    <div class="form-group"><label class="form-label">E-mail</label><input class="form-input" id="cad-email" type="email" placeholder="seu@email.com"/></div>
+    <div class="form-group"><label class="form-label">Senha</label><input class="form-input" id="cad-senha" type="password" placeholder="Mínimo 6 caracteres"/></div>
+    <div class="form-group"><label class="form-label">Confirmar senha</label><input class="form-input" id="cad-confirma" type="password" placeholder="Digite a senha novamente"/></div>
+    <button class="btn-full" id="cadastro-btn" onclick="doCadastro()">Criar conta grátis</button>
+    <div class="auth-divider"><div class="auth-divider-line"></div><div class="auth-divider-text">ou</div><div class="auth-divider-line"></div></div>
+    <button class="btn-google" onclick="doLoginGoogle()">
+      <svg class="google-icon" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+      Continuar com Google
+    </button>
+  </div>
+</div>
+```
+
   </div>
 </div>
 
@@ -747,17 +815,15 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
 
 ```
 <main class="main">
-  <!-- Verify banner -->
   <div id="verify-banner">
     <span class="banner-text">📧 Verifique seu e-mail para ativar a conta completa.</span>
     <button class="banner-close" onclick="dismissBanner()">×</button>
   </div>
 
-  <!-- GERAL -->
   <div class="page active" id="page-geral">
     <div class="page-header">
       <div><div class="page-title">Visão Geral</div><div class="page-sub" id="geral-sub">Resumo do mês</div></div>
-      <div class="month-nav"><button class="month-btn" onclick="changeMonth(-1)">‹</button><div class="month-label" id="month-label">—</div><button class="month-btn" onclick="changeMonth(1)">›</button></div>
+      <div class="month-nav"><button class="month-btn" onclick="changeMonth(-1)">‹</button><div class="month-label" id="month-label">—</div><button class="month-btn-next" onclick="changeMonth(1)">›</button></div>
     </div>
     <div class="card-hero" style="margin-bottom:20px;">
       <div class="card-label-white">Saldo do Mês</div>
@@ -771,22 +837,20 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
     <div class="grid-3-2">
       <div class="card"><div class="section-title">Últimas transações</div><div class="tx-list" id="g-tx-list"></div></div>
       <div style="display:flex;flex-direction:column;gap:16px;">
-        <div class="card"><div class="section-title">Previsão do mês</div><div id="g-forecast-content"><div style="color:var(--text3);font-size:13px;font-weight:600;">Adicione transações para ver a previsão.</div></div></div>
+        <div class="card"><div class="section-title">Previsão do mês</div><div id="g-forecast-content"></div></div>
         <div class="card"><div class="section-title">Objetivos ativos</div><div id="g-obj-mini" style="display:flex;flex-direction:column;gap:12px;"></div></div>
       </div>
     </div>
   </div>
 
-  <!-- TRANSAÇÕES -->
   <div class="page" id="page-transacoes">
     <div class="page-header">
       <div><div class="page-title">Transações</div><div class="page-sub">Todos os lançamentos do mês</div></div>
-      <div class="month-nav"><button class="month-btn" onclick="changeMonth(-1)">‹</button><div class="month-label" id="month-label-tx">—</div><button class="month-btn" onclick="changeMonth(1)">›</button></div>
+      <div class="month-nav"><button class="month-btn" onclick="changeMonth(-1)">‹</button><div class="month-label" id="month-label-tx">—</div><button class="month-btn-next" onclick="changeMonth(1)">›</button></div>
     </div>
     <div class="card"><div class="tx-list" id="tx-full-list"></div></div>
   </div>
 
-  <!-- PREVISÃO -->
   <div class="page" id="page-previsao">
     <div class="page-header"><div><div class="page-title">Previsão do Mês</div><div class="page-sub" id="prev-sub">Projeção com base no ritmo atual</div></div></div>
     <div class="cards-row">
@@ -801,17 +865,15 @@ body{background:var(--bg);color:var(--text);font-family:'Nunito',sans-serif;font
     <div class="chart-card"><div class="section-title">Histórico de gastos mensais</div><div class="comp-chart-wrap"><canvas id="histChart"></canvas></div></div>
   </div>
 
-  <!-- OBJETIVOS -->
   <div class="page" id="page-objetivos">
     <div class="page-header"><div><div class="page-title">Objetivos</div><div class="page-sub">Metas financeiras e progresso</div></div></div>
     <div class="obj-grid" id="obj-grid"></div>
   </div>
 
-  <!-- GRÁFICOS -->
   <div class="page" id="page-graficos">
     <div class="page-header">
       <div><div class="page-title">Gráficos</div><div class="page-sub">Para onde está indo o seu dinheiro</div></div>
-      <div class="month-nav"><button class="month-btn" onclick="changeMonth(-1)">‹</button><div class="month-label" id="month-label-graf">—</div><button class="month-btn" onclick="changeMonth(1)">›</button></div>
+      <div class="month-nav"><button class="month-btn" onclick="changeMonth(-1)">‹</button><div class="month-label" id="month-label-graf">—</div><button class="month-btn-next" onclick="changeMonth(1)">›</button></div>
     </div>
     <div class="grid-2" style="margin-bottom:20px;">
       <div class="chart-card"><div class="section-title">Gastos por categoria</div><div class="chart-wrap"><canvas id="pieChart"></canvas></div></div>
